@@ -1,10 +1,10 @@
-"""RetinaView V4 multi-domain inference API."""
+"""EyeZen V4 multi-domain inference API."""
 import io, json, logging, os, uuid
 from datetime import datetime
 from pathlib import Path
 import cv2, numpy as np
 from PIL import Image
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from reportlab.lib.pagesizes import letter
@@ -15,7 +15,7 @@ ROOT=Path(__file__).parent; ART=Path(os.getenv("ARTIFACTS_DIR",ROOT/"artifacts")
 for d in (OUT/"images",OUT/"reports"): d.mkdir(parents=True,exist_ok=True)
 DEMO_MODE=os.getenv("DEMO_MODE","false").lower()=="true"; CLASSES=["No DR","Mild DR","Moderate DR","Severe DR","Proliferative DR"]
 REQUIRED_CALIBRATION_KEYS={"grade_temperature","screen_fusion_alpha_binary_head","screen_fusion_alpha_grade_sum","platt_a","platt_b","referral_threshold","threshold_rule"}
-logging.basicConfig(level=logging.INFO,format="%(levelname)s: %(message)s"); log=logging.getLogger("retinaview.ml")
+logging.basicConfig(level=logging.INFO,format="%(levelname)s: %(message)s"); log=logging.getLogger("eyezen.ml")
 classifier=segmenter=grad_model=calibration=deployment=None; status={"classifierLoaded":False,"segmentationLoaded":False,"calibrationLoaded":False}
 def artifact(name): return ART/name
 def load_v4_artifacts():
@@ -73,19 +73,30 @@ def build_inference_result(raw_grade,raw_binary):
  result={"modelVersion":"V4 Multi-Domain","grade":grade,"gradeLabel":CLASSES[grade],"gradeConfidence":round(float(probabilities[grade]),5),"gradeProbabilities":{f"grade{i}":round(float(v),5) for i,v in enumerate(probabilities)},"rawBinaryReferableProbability":round(raw_binary,5),"gradeBasedReferableProbability":round(grade_based,5),"referableProbability":round(referable,5),"referralThreshold":threshold,"decision":decision,"lesionOverlayUrl":None,"gradcamUrl":None,"reportUrl":None,"segmentationAvailable":bool(status["segmentationLoaded"]),"explanation":{"lesionLocalization":"U-Net","classifierAttention":"Grad-CAM"},"processing":{"classifierInput":"cropped RGB, 300x300, float32 0-255","segmentationInput":"cropped RGB, 384x384, float32 0-255"}}
  result.update({"predictedGrade":grade,"calibratedConfidence":result["gradeConfidence"],"classProbabilities":list(result["gradeProbabilities"].values()),"referralDecision":decision,"gradCamUrl":None,"modelMode":"demo" if DEMO_MODE else "real","fusedReferableProbability":round(fused,5)})
  return result
-def create_report(path,result,lesion_path,gradcam_path):
- c=canvas.Canvas(str(path),pagesize=letter);c.setTitle("RetinaView screening report");c.setFont("Helvetica-Bold",18);c.drawString(50,750,"RetinaView — Screening Review");c.setFont("Helvetica",10)
- lines=[f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",f"DR severity: Grade {result['grade']} — {result['gradeLabel']}",f"Grade confidence: {result['gradeConfidence']:.1%}",f"Referable DR probability: {result['referableProbability']:.1%}",f"Screening recommendation: {result['decision']} (threshold: {result['referralThreshold']:.4f})","Screening decision-support prototype only; not a clinical diagnosis.","U-Net is lesion localization. Grad-CAM is classifier attention, not precise lesion localization."]
- y=720
- for line in lines:c.drawString(50,y,line);y-=18
- c.drawImage(ImageReader(str(lesion_path)),55,140,width=220,height=220,preserveAspectRatio=True);c.drawImage(ImageReader(str(gradcam_path)),330,140,width=220,height=220,preserveAspectRatio=True);c.save()
-app=FastAPI(title="RetinaView Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","*").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
+def create_report(path,result,lesion_path,gradcam_path,patient):
+ c=canvas.Canvas(str(path),pagesize=letter);c.setTitle("EyeZen screening report");width,height=letter
+ def heading(text,y): c.setFillColor("#17283b");c.setFont("Helvetica-Bold",12);c.drawString(48,y,text);c.setStrokeColor("#9fb5c8");c.line(48,y-5,width-48,y-5);return y-22
+ def row(label,value,y): c.setFillColor("#3b4b5c");c.setFont("Helvetica-Bold",9);c.drawString(52,y,label);c.setFillColor("#101820");c.setFont("Helvetica",9);c.drawString(190,y,str(value if value not in (None,"") else "—"));return y-16
+ c.setFillColor("#0f5f8d");c.rect(0,height-82,width,82,fill=1,stroke=0);c.setFillColor("white");c.setFont("Helvetica-Bold",24);c.drawString(48,height-45,"EyeZen");c.setFont("Helvetica",11);c.drawString(48,height-64,"AI-Assisted Diabetic Retinopathy Screening Report")
+ y=height-108;y=heading("Patient Information",y)
+ for label,value in [("Patient Name",patient.get("name")),("Age",patient.get("age")),("Record ID",patient.get("recordId")),("Screening Date",datetime.now().strftime("%d %b %Y, %H:%M"))]:y=row(label,value,y)
+ y-=8;y=heading("Screening Summary",y)
+ recommendation="Refer for ophthalmic evaluation." if result["decision"]=="REFER" else "Routine follow-up according to local screening protocol."
+ for label,value in [("Predicted DR Grade",f"Grade {result['grade']} - {result['gradeLabel']}"),("Grade Confidence",f"{result['gradeConfidence']:.1%}"),("Referable DR Probability",f"{result['referableProbability']:.1%}"),("Referral Threshold",f"{result['referralThreshold']:.1%}"),("Screening Recommendation",recommendation)]:y=row(label,value,y)
+ y-=8;y=heading("Grade Probabilities",y)
+ for i,label in enumerate(CLASSES): y=row(f"Grade {i} - {label}",f"{result['gradeProbabilities'].get(f'grade{i}',0):.1%}",y)
+ c.setFont("Helvetica",8);c.setFillColor("#526170");c.drawString(48,32,"Screening decision-support prototype only; not a clinical diagnosis.");c.drawRightString(width-48,32,"Page 1 of 2");c.showPage()
+ c.setFillColor("#17283b");c.setFont("Helvetica-Bold",18);c.drawString(48,height-52,"EyeZen - Explainable AI")
+ c.setFont("Helvetica-Bold",12);c.drawString(48,height-82,"Lesion Localization - U-Net");c.drawImage(ImageReader(str(lesion_path)),48,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,370,"U-Net highlights regions predicted to contain pathological retinal lesions.")
+ c.setFont("Helvetica-Bold",12);c.drawString(325,height-82,"Classifier Attention - Grad-CAM");c.drawImage(ImageReader(str(gradcam_path)),325,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,340,"Grad-CAM indicates regions that most influenced the classifier's referable-DR decision and should not be interpreted as") ;c.drawString(48,326,"precise lesion localization.")
+ c.setFont("Helvetica-Bold",12);c.setFillColor("#17283b");c.drawString(48,285,"Responsible Use");c.setFont("Helvetica",10);c.setFillColor("#101820");c.drawString(48,266,"Screening decision-support prototype only; not a clinical diagnosis.");c.setFillColor("#526170");c.setFont("Helvetica",8);c.drawRightString(width-48,32,"Page 2 of 2");c.save()
+app=FastAPI(title="EyeZen Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","*").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
 @app.on_event("startup")
 def startup():init_models()
 @app.get("/health")
 def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","inferenceMode":"DEMO" if DEMO_MODE else "REAL","classifier":"V4 Multi-Domain",**status}
 @app.post("/infer")
-async def infer(image:UploadFile=File(...)):
+async def infer(image:UploadFile=File(...),patientName:str=Form(""),recordId:str=Form(""),age:str=Form("")):
  suffix=Path(image.filename or "").suffix.lower();mime=(image.content_type or "").lower()
  if suffix not in (".jpg",".jpeg",".png") and mime not in ("image/jpeg","image/jpg","image/png","image/x-png"):raise HTTPException(400,"Unsupported file type. Upload a JPG or PNG image.")
  try:original=Image.open(io.BytesIO(await image.read())).convert("RGB")
@@ -97,4 +108,4 @@ async def infer(image:UploadFile=File(...)):
   if not np.isfinite(lesion_probability).all():raise RuntimeError("Segmentation returned invalid values")
   mask=lesion_probability>=float(deployment["segmentation"]["threshold"]);heatmap=generate_gradcam(cls[None])
  except Exception as exc:log.exception("Inference failed");raise HTTPException(500,"Inference failed. See service logs for details.") from exc
- result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";result["lesionOverlayUrl"]=save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);result["gradcamUrl"]=result["gradCamUrl"]=save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam);result["reportUrl"]="/reports/"+report.name;return result
+ result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";result["lesionOverlayUrl"]=save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);result["gradcamUrl"]=result["gradCamUrl"]=save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam,{"name":patientName,"recordId":recordId,"age":age});result["reportUrl"]="/reports/"+report.name;return result
