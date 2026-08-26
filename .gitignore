@@ -6,5 +6,7 @@ __pycache__/
 *.pyc
 *.keras
 *.h5
+!ml-service/artifacts/dr_multidomain_efficientnetb0_v4.keras
+!ml-service/artifacts/idrid_lesion_unet_final.weights.h5
 .npm-cache/
 ml-service/runtime/

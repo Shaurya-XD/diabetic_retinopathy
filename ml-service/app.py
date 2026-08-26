@@ -2,6 +2,8 @@
 import io, json, logging, os, uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 import cv2, numpy as np
 from PIL import Image
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -66,6 +68,19 @@ def generate_gradcam(classifier_input):
  if gradients is None: raise RuntimeError("Grad-CAM gradients are None")
  features=tf.cast(features,tf.float32);gradients=tf.cast(gradients,tf.float32);weights=tf.reduce_mean(gradients,axis=(1,2));cam=tf.nn.relu(tf.reduce_sum(features*weights[:,None,None,:],axis=-1)[0]);maximum=tf.reduce_max(cam);cam=tf.cond(maximum>0,lambda:cam/maximum,lambda:tf.zeros_like(cam));return np.ascontiguousarray(np.nan_to_num(cam.numpy().astype(np.float32),nan=0.,posinf=0.,neginf=0.))
 def save_png(image,path): Image.fromarray(image).save(path,"PNG");return "/images/"+path.name
+def fetch_private_image(url):
+ parsed=urlparse(url)
+ if parsed.scheme!="https" or not (parsed.hostname or "").endswith(".private.blob.vercel-storage.com"):raise HTTPException(400,"Invalid private image source.")
+ try:
+  with urlopen(Request(url,headers={"Accept":"image/jpeg,image/png"}),timeout=20) as response:
+   content_type=response.headers.get_content_type();data=response.read(12*1024*1024+1)
+  if content_type not in ("image/jpeg","image/png") or len(data)>12*1024*1024:raise ValueError("invalid image response")
+  return data
+ except Exception as exc:raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
+def put_scoped(url,path,content_type):
+ try:
+  request=Request(url,data=path.read_bytes(),method="PUT",headers={"Content-Type":content_type});urlopen(request,timeout=30).read()
+ except Exception as exc:raise RuntimeError("Unable to persist generated asset") from exc
 def make_overlay(base,mask):
  layer=np.zeros_like(base);layer[mask]=(220,32,44);return cv2.addWeighted(base,1,layer,.48,0)
 def build_inference_result(raw_grade,raw_binary):
@@ -90,16 +105,21 @@ def create_report(path,result,lesion_path,gradcam_path,patient):
  c.setFont("Helvetica-Bold",12);c.drawString(48,height-82,"Lesion Localization - U-Net");c.drawImage(ImageReader(str(lesion_path)),48,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,370,"U-Net highlights regions predicted to contain pathological retinal lesions.")
  c.setFont("Helvetica-Bold",12);c.drawString(325,height-82,"Classifier Attention - Grad-CAM");c.drawImage(ImageReader(str(gradcam_path)),325,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,340,"Grad-CAM indicates regions that most influenced the classifier's referable-DR decision and should not be interpreted as") ;c.drawString(48,326,"precise lesion localization.")
  c.setFont("Helvetica-Bold",12);c.setFillColor("#17283b");c.drawString(48,285,"Responsible Use");c.setFont("Helvetica",10);c.setFillColor("#101820");c.drawString(48,266,"Screening decision-support prototype only; not a clinical diagnosis.");c.setFillColor("#526170");c.setFont("Helvetica",8);c.drawRightString(width-48,32,"Page 2 of 2");c.save()
-app=FastAPI(title="EyeZen Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","*").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
+app=FastAPI(title="EyeZen Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","http://localhost:5173").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
 @app.on_event("startup")
 def startup():init_models()
 @app.get("/health")
-def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","inferenceMode":"DEMO" if DEMO_MODE else "REAL","classifier":"V4 Multi-Domain",**status}
+def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","inferenceMode":"DEMO" if DEMO_MODE else "REAL","classifier":"V4 Multi-Domain","storage":os.getenv("STORAGE_MODE","local"),**status}
 @app.post("/infer")
-async def infer(image:UploadFile=File(...),patientName:str=Form(""),recordId:str=Form(""),age:str=Form("")):
- suffix=Path(image.filename or "").suffix.lower();mime=(image.content_type or "").lower()
- if suffix not in (".jpg",".jpeg",".png") and mime not in ("image/jpeg","image/jpg","image/png","image/x-png"):raise HTTPException(400,"Unsupported file type. Upload a JPG or PNG image.")
- try:original=Image.open(io.BytesIO(await image.read())).convert("RGB")
+async def infer(image:UploadFile|None=File(None),imageUrl:str=Form(""),assetUploads:str=Form(""),assetPaths:str=Form(""),storageMode:str=Form("local"),patientName:str=Form(""),recordId:str=Form(""),age:str=Form("")):
+ if imageUrl:
+  payload=fetch_private_image(imageUrl)
+ elif image is not None:
+  suffix=Path(image.filename or "").suffix.lower();mime=(image.content_type or "").lower()
+  if suffix not in (".jpg",".jpeg",".png") and mime not in ("image/jpeg","image/jpg","image/png","image/x-png"):raise HTTPException(400,"Unsupported file type. Upload a JPG or PNG image.")
+  payload=await image.read()
+ else:raise HTTPException(400,"An uploaded image is required.")
+ try:original=Image.open(io.BytesIO(payload)).convert("RGB")
  except Exception as exc:raise HTTPException(400,"Unable to decode the uploaded image.") from exc
  cropped=crop_fundus(original);cls=np.asarray(cropped.resize((300,300)),dtype=np.float32).clip(0,255);seg=np.asarray(cropped.resize((384,384)),dtype=np.float32).clip(0,255)
  if DEMO_MODE:raise HTTPException(503,"DEMO_MODE is enabled; real V4 screening is required for this deployment.")
@@ -108,4 +128,11 @@ async def infer(image:UploadFile=File(...),patientName:str=Form(""),recordId:str
   if not np.isfinite(lesion_probability).all():raise RuntimeError("Segmentation returned invalid values")
   mask=lesion_probability>=float(deployment["segmentation"]["threshold"]);heatmap=generate_gradcam(cls[None])
  except Exception as exc:log.exception("Inference failed");raise HTTPException(500,"Inference failed. See service logs for details.") from exc
- result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";result["lesionOverlayUrl"]=save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);result["gradcamUrl"]=result["gradCamUrl"]=save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam,{"name":patientName,"recordId":recordId,"age":age});result["reportUrl"]="/reports/"+report.name;return result
+ result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam,{"name":patientName,"recordId":recordId,"age":age})
+ if storageMode=="vercel-blob":
+  try:
+   uploads=json.loads(assetUploads);paths=json.loads(assetPaths);put_scoped(uploads["lesionUploadUrl"],lesion,"image/png");put_scoped(uploads["gradcamUploadUrl"],cam,"image/png");put_scoped(uploads["reportUploadUrl"],report,"application/pdf");result.update({"lesionBlobPath":paths["lesionBlobPath"],"gradcamBlobPath":paths["gradcamBlobPath"],"reportBlobPath":paths["reportBlobPath"],"lesionOverlayUrl":None,"gradcamUrl":None,"gradCamUrl":None,"reportUrl":None})
+  finally:
+   for path in (lesion,cam,report):path.unlink(missing_ok=True)
+ else:result["lesionOverlayUrl"]="/images/"+lesion.name;result["gradcamUrl"]=result["gradCamUrl"]="/images/"+cam.name;result["reportUrl"]="/reports/"+report.name
+ return result

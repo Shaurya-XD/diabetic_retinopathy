@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build --prefix client",
+  "outputDirectory": "client/dist",
+  "functions": {
+    "api/ml.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{work/**,uploads/**,outputs/**,**/*.ipynb,node_modules/**,ml-service/runtime/**}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/ml/(.*)", "destination": "/api/ml.py" },
+    { "source": "/api/(.*)", "destination": "/api/index.js" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

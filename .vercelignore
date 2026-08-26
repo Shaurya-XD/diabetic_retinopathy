@@ -1,0 +1,8 @@
+node_modules
+work
+uploads
+outputs
+ml-service/runtime
+*.ipynb
+.npm-cache
+README.md
