@@ -1,0 +1,43 @@
+{
+  "model_version": "V4 multi-domain",
+  "classifier_path": "/content/drive/MyDrive/sih/outputs_v4_multidomain/dr_multidomain_efficientnetb0_v4.keras",
+  "classifier_input_size": [
+    300,
+    300
+  ],
+  "classifier_input_range": "float32 0-255",
+  "preprocessing": [
+    "decode RGB fundus image",
+    "crop excess black border using pixel threshold 10",
+    "resize directly to 300x300",
+    "keep pixels in 0-255 range",
+    "do not divide by 255 because Keras EfficientNetB0 contains internal rescaling"
+  ],
+  "grade_classes": {
+    "0": "No DR",
+    "1": "Mild DR",
+    "2": "Moderate DR",
+    "3": "Severe DR",
+    "4": "Proliferative DR"
+  },
+  "screening": {
+    "referable_definition": "grade >= 2",
+    "grade_temperature": 0.8513582259411072,
+    "screen_fusion_alpha_binary_head": 0.6000000000000001,
+    "screen_fusion_alpha_grade_sum": 0.3999999999999999,
+    "platt_a": 1.1929323509158407,
+    "platt_b": -0.11929372221114104,
+    "referral_threshold": 0.29620460133330245,
+    "threshold_rule": ">=90% validation sensitivity, then maximum specificity"
+  },
+  "segmentation": {
+    "weights_path": "/content/drive/MyDrive/sih/outputs_v3/idrid_lesion_unet_final.weights.h5",
+    "input_size": [
+      384,
+      384
+    ],
+    "threshold": 0.8500000000000002,
+    "target": "binary union of microaneurysms, hemorrhages, hard exudates, soft exudates"
+  },
+  "responsible_use": "Screening decision-support prototype only; not a clinical diagnosis."
+}

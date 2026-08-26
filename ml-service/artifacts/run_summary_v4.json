@@ -1,0 +1,96 @@
+{
+  "project": "Explainable DR Screening V4 Multi-Domain",
+  "seed": 42,
+  "config": {
+    "seed": 42,
+    "cls_size": [
+      300,
+      300
+    ],
+    "batch_size": 24,
+    "eyepacs_target": 6000,
+    "ddr_target": 3500,
+    "target_class_proportions": {
+      "0": 0.3,
+      "1": 0.15,
+      "2": 0.25,
+      "3": 0.15,
+      "4": 0.15
+    },
+    "head_epochs": 3,
+    "fine_epochs": 6,
+    "fine_tune_layers": 45,
+    "head_lr": 0.0005,
+    "fine_lr": 1.5e-05,
+    "screening_sensitivity_target": 0.9,
+    "mixed_precision": "<DTypePolicy \"mixed_float16\">"
+  },
+  "training_sources": {
+    "aptos_train": 2563,
+    "eyepacs_train": 5400,
+    "ddr_train": 3150
+  },
+  "validation_sources": {
+    "aptos_val": 549,
+    "eyepacs_val": 600,
+    "ddr_val": 350
+  },
+  "selected_classifier_stage": "fine_tuned",
+  "selected_validation_metrics_raw": {
+    "accuracy": 0.5950633755837225,
+    "qwk": 0.7686315930889408,
+    "referable_auc": 0.931762419314575,
+    "composite": 0.8501970062017579
+  },
+  "calibration": {
+    "grade_temperature": 0.8513582259411072,
+    "screen_fusion_alpha_binary_head": 0.6000000000000001,
+    "screen_fusion_alpha_grade_sum": 0.3999999999999999,
+    "platt_a": 1.1929323509158407,
+    "platt_b": -0.11929372221114104,
+    "referral_threshold": 0.29620460133330245,
+    "threshold_rule": ">=90% validation sensitivity, then maximum specificity"
+  },
+  "aptos_final_test": {
+    "dataset": "APTOS held-out test \u2014 V4",
+    "n": 550,
+    "five_class_accuracy": 0.74,
+    "qwk": 0.8533645571987656,
+    "referable_auc": 0.9655929019075439,
+    "sensitivity": 0.9596412556053812,
+    "specificity": 0.8409785932721713,
+    "tn": 275,
+    "fp": 52,
+    "fn": 9,
+    "tp": 214
+  },
+  "messidor_external_test": {
+    "dataset": "Messidor-2 untouched external test \u2014 V4",
+    "n": 1744,
+    "five_class_accuracy": 0.6244266055045872,
+    "qwk": 0.563771965532138,
+    "referable_auc": 0.8116920764623172,
+    "sensitivity": 0.6849015317286652,
+    "specificity": 0.8010878010878011,
+    "tn": 1031,
+    "fp": 256,
+    "fn": 144,
+    "tp": 313
+  },
+  "segmentation_reused": true,
+  "segmentation_threshold": 0.8500000000000002,
+  "paths": {
+    "classifier": "/content/drive/MyDrive/sih/outputs_v4_multidomain/dr_multidomain_efficientnetb0_v4.keras",
+    "output_root": "/content/drive/MyDrive/sih/outputs_v4_multidomain",
+    "train_manifest": "/content/drive/MyDrive/sih/outputs_v4_multidomain/manifests/train_manifest.csv",
+    "validation_manifest": "/content/drive/MyDrive/sih/outputs_v4_multidomain/manifests/validation_manifest.csv",
+    "aptos_test_manifest": "/content/drive/MyDrive/sih/outputs_v4_multidomain/manifests/aptos_final_test_manifest.csv"
+  },
+  "methodology": {
+    "messidor_used_in_training": false,
+    "messidor_used_for_calibration": false,
+    "messidor_used_for_threshold_selection": false,
+    "eyepacs_source": "ctmedtech/EYEPACS downloaded directly from Hugging Face",
+    "screening_decision": "calibrated validation-selected fusion of binary screening head and P(grade 2-4)"
+  }
+}

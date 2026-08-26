@@ -1,0 +1,9 @@
+{
+  "grade_temperature": 0.8513582259411072,
+  "screen_fusion_alpha_binary_head": 0.6000000000000001,
+  "screen_fusion_alpha_grade_sum": 0.3999999999999999,
+  "platt_a": 1.1929323509158407,
+  "platt_b": -0.11929372221114104,
+  "referral_threshold": 0.29620460133330245,
+  "threshold_rule": ">=90% validation sensitivity, then maximum specificity"
+}

@@ -1,4 +1,4 @@
-"""RetinaView inference API. Model artifacts remain in this service."""
+"""RetinaView V4 multi-domain inference API."""
 import io, json, logging, os, uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,110 +11,90 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-ROOT=Path(__file__).parent; ART=Path(os.getenv('ARTIFACTS_DIR',ROOT/'artifacts')); OUT=Path(os.getenv('OUTPUT_DIR',ROOT/'runtime'))
-for directory in (OUT/'images',OUT/'reports'): directory.mkdir(parents=True,exist_ok=True)
-DEMO_MODE=os.getenv('DEMO_MODE','true').lower()=='true'; CLASSES=['No DR','Mild NPDR','Moderate NPDR','Severe NPDR','Proliferative DR']
-logging.basicConfig(level=logging.INFO,format='%(levelname)s: %(message)s'); log=logging.getLogger('retinaview.ml')
-classifier=segmenter=summary=grad_model=None; status={'classifierLoaded':False,'segmenterLoaded':False,'summaryLoaded':False}
-
-def artifact(key): return ART/os.getenv(key,{'CLASSIFIER_PATH':'aptos_efficientnetb0_final.keras','UNET_WEIGHTS_PATH':'idrid_lesion_unet_final.weights.h5','RUN_SUMMARY_PATH':'run_summary.json'}[key])
-def load_summary():
- global summary
- with artifact('RUN_SUMMARY_PATH').open(encoding='utf-8') as f: summary=json.load(f)
- _=summary['classifier']['temperature'],summary['classifier']['referral_threshold'],summary['segmentation']['validation_threshold']
- status['summaryLoaded']=True; log.info('run_summary loaded: YES')
+ROOT=Path(__file__).parent; ART=Path(os.getenv("ARTIFACTS_DIR",ROOT/"artifacts")); OUT=Path(os.getenv("OUTPUT_DIR",ROOT/"runtime"))
+for d in (OUT/"images",OUT/"reports"): d.mkdir(parents=True,exist_ok=True)
+DEMO_MODE=os.getenv("DEMO_MODE","false").lower()=="true"; CLASSES=["No DR","Mild DR","Moderate DR","Severe DR","Proliferative DR"]
+REQUIRED_CALIBRATION_KEYS={"grade_temperature","screen_fusion_alpha_binary_head","screen_fusion_alpha_grade_sum","platt_a","platt_b","referral_threshold","threshold_rule"}
+logging.basicConfig(level=logging.INFO,format="%(levelname)s: %(message)s"); log=logging.getLogger("retinaview.ml")
+classifier=segmenter=grad_model=calibration=deployment=None; status={"classifierLoaded":False,"segmentationLoaded":False,"calibrationLoaded":False}
+def artifact(name): return ART/name
+def load_v4_artifacts():
+ global calibration,deployment
+ required=["dr_multidomain_efficientnetb0_v4.keras","calibration_v4.json","deployment_config_v4.json","run_summary_v4.json","idrid_lesion_unet_final.weights.h5"]
+ missing=[n for n in required if not artifact(n).is_file()]
+ if missing: raise RuntimeError(f"Missing required V4 artifact(s): {', '.join(missing)}")
+ try: calibration=json.loads(artifact("calibration_v4.json").read_text(encoding="utf-8"));deployment=json.loads(artifact("deployment_config_v4.json").read_text(encoding="utf-8"))
+ except json.JSONDecodeError as exc: raise RuntimeError(f"Invalid V4 JSON artifact: {exc}") from exc
+ missing_keys=REQUIRED_CALIBRATION_KEYS-calibration.keys()
+ if missing_keys: raise RuntimeError(f"calibration_v4.json is missing keys: {', '.join(sorted(missing_keys))}")
+ if float(calibration["grade_temperature"])<=0 or not 0<=float(calibration["referral_threshold"])<=1: raise RuntimeError("calibration_v4.json contains invalid temperature or referral threshold")
+ status["calibrationLoaded"]=True
 def init_models():
  global classifier,segmenter,grad_model
- load_summary()
- if DEMO_MODE: log.info('Inference mode: DEMO'); return
+ load_v4_artifacts()
+ if DEMO_MODE: log.warning("Inference mode: DEMO (explicitly enabled)");return
  try:
   import tensorflow as tf
-  classifier=tf.keras.models.load_model(artifact('CLASSIFIER_PATH'),compile=False);status['classifierLoaded']=True;grad_model=build_gradcam_model(classifier);log.info('Classifier loaded: YES')
+  classifier=tf.keras.models.load_model(artifact("dr_multidomain_efficientnetb0_v4.keras"),compile=False);grad_model=build_gradcam_model(classifier);status["classifierLoaded"]=True
   from model_adapter import build_unet
-  segmenter=build_unet();log.info('Segmentation model built: YES');segmenter.load_weights(artifact('UNET_WEIGHTS_PATH'));status['segmenterLoaded']=True;log.info('Segmentation weights loaded: YES');log.info('Inference mode: REAL')
+  segmenter=build_unet();segmenter.load_weights(artifact("idrid_lesion_unet_final.weights.h5"));status["segmentationLoaded"]=True;log.info("REAL V4 classifier and IDRiD U-Net loaded")
  except Exception as exc:
-  classifier=segmenter=grad_model=None;log.exception('REAL inference initialization failed: %s',exc);raise RuntimeError('REAL model loading failed; inspect the service log. Demo fallback was not used.') from exc
-
+  classifier=segmenter=grad_model=None;status["classifierLoaded"]=status["segmentationLoaded"]=False;log.exception("V4 startup failed");raise RuntimeError("REAL V4 model loading failed; inspect the service log.") from exc
 def crop_fundus(image):
- rgb=np.asarray(image.convert('RGB'));foreground=np.max(rgb,axis=2)>10;ys,xs=np.where(foreground)
- if not len(xs): return image.convert('RGB')
+ rgb=np.asarray(image.convert("RGB"));foreground=np.max(rgb,axis=2)>10;ys,xs=np.where(foreground)
+ if not len(xs): return image.convert("RGB")
  pad=max(2,int(min(rgb.shape[:2])*.01));return Image.fromarray(rgb[max(0,ys.min()-pad):min(rgb.shape[0],ys.max()+pad+1),max(0,xs.min()-pad):min(rgb.shape[1],xs.max()+pad+1)])
-def softmax(values):
- values=values-np.max(values);exp=np.exp(values);return exp/exp.sum()
-def calibrated_probabilities(raw): return softmax(np.log(np.clip(raw,1e-8,1.0))/float(summary['classifier']['temperature']))
-def find_backbone(model):
- """Returns the nested EfficientNet model that owns top_conv."""
- try:return model.get_layer('efficientnetb0')
- except ValueError:pass
- for layer in model.layers:
-  if hasattr(layer,'layers'):
-   try:
-    layer.get_layer('top_conv');return layer
-   except ValueError:
-    found=find_backbone(layer) if layer.layers else None
-    if found is not None:return found
- return None
+def temperature_scale(probabilities):
+ logits=np.log(np.clip(np.asarray(probabilities,dtype=np.float64),1e-8,1.0))/float(calibration["grade_temperature"]);logits-=np.max(logits);exp=np.exp(logits);return (exp/exp.sum()).astype(np.float32)
+def calibrate_referable_probability(binary_probability,grade_probability):
+ fused=float(calibration["screen_fusion_alpha_binary_head"])*binary_probability+float(calibration["screen_fusion_alpha_grade_sum"])*grade_probability;fused=float(np.clip(fused,1e-8,1-1e-8));logit=np.log(fused/(1-fused));return float(1/(1+np.exp(-(float(calibration["platt_a"])*logit+float(calibration["platt_b"]))))),fused
+def normalize_classifier_outputs(outputs):
+ if isinstance(outputs,dict): grade,referable=outputs.get("grade"),outputs.get("referable")
+ elif isinstance(outputs,(list,tuple)) and len(outputs)>=2: grade,referable=outputs[0],outputs[1]
+ else: raise RuntimeError("V4 classifier must return both grade and referable outputs")
+ if grade is None or referable is None: raise RuntimeError("V4 classifier outputs are missing grade or referable")
+ grade=np.asarray(grade,dtype=np.float32).reshape(-1,5)[0];referable=float(np.asarray(referable,dtype=np.float32).reshape(-1)[0])
+ if not np.isfinite(grade).all() or not np.isfinite(referable) or not 0<=referable<=1: raise RuntimeError("V4 classifier returned invalid output values")
+ return grade,referable
 def build_gradcam_model(model):
- """Replays the outer classifier head over a backbone-internal feature graph."""
  import tensorflow as tf
- backbone=find_backbone(model)
- if backbone is None:raise RuntimeError('Could not locate nested EfficientNetB0 backbone for Grad-CAM')
- try:last_conv=backbone.get_layer('top_conv')
- except ValueError as exc:raise RuntimeError('Could not locate top_conv in EfficientNetB0 backbone') from exc
- feature_extractor=tf.keras.Model(inputs=backbone.input,outputs=[last_conv.output,backbone.output],name='gradcam_feature_extractor')
- grad_input=tf.keras.Input(shape=model.input_shape[1:],name='gradcam_input')
- conv_features,backbone_features=feature_extractor(grad_input,training=False)
- x=model.get_layer('gap')(backbone_features)
- x=model.get_layer('head_dropout')(x,training=False)
- predictions=model.get_layer('grade')(x)
- return tf.keras.Model(inputs=grad_input,outputs=[conv_features,predictions],name='referable_gradcam_model')
-def gradcam(classifier_input):
+ backbone=model.get_layer("efficientnetb0");extractor=tf.keras.Model(backbone.input,[backbone.get_layer("top_conv").output,backbone.output]);input_=tf.keras.Input(shape=model.input_shape[1:]);conv,features=extractor(input_,training=False);x=model.get_layer("gap")(features);x=model.get_layer("referable_dropout")(x,training=False);logit=model.get_layer("referable_logit")(x);return tf.keras.Model(input_,[conv,logit],name="v4_referable_gradcam")
+def generate_gradcam(classifier_input):
  import tensorflow as tf
- if grad_model is None:raise RuntimeError('Grad-CAM model has not been initialized')
- try:
-  with tf.GradientTape() as tape:
-   features,probabilities=grad_model(classifier_input,training=False);score=tf.reduce_sum(probabilities[:,2:5],axis=1)
-  gradients=tape.gradient(score,features)
- except Exception as exc:raise RuntimeError(f'Grad-CAM execution failed: {exc}') from exc
- if gradients is None:raise RuntimeError('Grad-CAM gradients are None')
- weights=tf.reduce_mean(gradients,axis=(1,2));cam=tf.reduce_sum(features*weights[:,None,None,:],axis=-1)[0];cam=tf.nn.relu(cam);maximum=tf.reduce_max(cam)
- cam=tf.cond(maximum>0,lambda:cam/maximum,lambda:tf.zeros_like(cam));heatmap=cam.numpy()
- if not np.isfinite(heatmap).all():raise RuntimeError('Grad-CAM produced non-finite values')
- return heatmap
-def demo_prediction(seg_image):
- gray=cv2.cvtColor(seg_image,cv2.COLOR_RGB2GRAY);_,mask=cv2.threshold(gray,70,255,cv2.THRESH_BINARY);mask=cv2.GaussianBlur(mask,(17,17),0)>120;seed=int(seg_image.mean())%5
- return np.roll(np.array([.03,.08,.22,.37,.30]),seed-3),mask,mask.astype('float32')
-def save_png(image,path):Image.fromarray(image).save(path,'PNG');return '/images/'+path.name
-def make_overlay(base,mask,color=(220,32,44)):
- layer=np.zeros_like(base);layer[mask]=color;return cv2.addWeighted(base,1,layer,.48,0)
+ with tf.GradientTape() as tape: features,logit=grad_model(classifier_input,training=False);target=tf.reduce_sum(logit)
+ gradients=tape.gradient(target,features)
+ if gradients is None: raise RuntimeError("Grad-CAM gradients are None")
+ features=tf.cast(features,tf.float32);gradients=tf.cast(gradients,tf.float32);weights=tf.reduce_mean(gradients,axis=(1,2));cam=tf.nn.relu(tf.reduce_sum(features*weights[:,None,None,:],axis=-1)[0]);maximum=tf.reduce_max(cam);cam=tf.cond(maximum>0,lambda:cam/maximum,lambda:tf.zeros_like(cam));return np.ascontiguousarray(np.nan_to_num(cam.numpy().astype(np.float32),nan=0.,posinf=0.,neginf=0.))
+def save_png(image,path): Image.fromarray(image).save(path,"PNG");return "/images/"+path.name
+def make_overlay(base,mask):
+ layer=np.zeros_like(base);layer[mask]=(220,32,44);return cv2.addWeighted(base,1,layer,.48,0)
+def build_inference_result(raw_grade,raw_binary):
+ probabilities=temperature_scale(raw_grade);grade=int(np.argmax(probabilities));grade_based=float(probabilities[2:].sum());referable,fused=calibrate_referable_probability(raw_binary,grade_based);threshold=float(calibration["referral_threshold"]);decision="REFER" if referable>=threshold else "NON_REFER"
+ result={"modelVersion":"V4 Multi-Domain","grade":grade,"gradeLabel":CLASSES[grade],"gradeConfidence":round(float(probabilities[grade]),5),"gradeProbabilities":{f"grade{i}":round(float(v),5) for i,v in enumerate(probabilities)},"rawBinaryReferableProbability":round(raw_binary,5),"gradeBasedReferableProbability":round(grade_based,5),"referableProbability":round(referable,5),"referralThreshold":threshold,"decision":decision,"lesionOverlayUrl":None,"gradcamUrl":None,"reportUrl":None,"segmentationAvailable":bool(status["segmentationLoaded"]),"explanation":{"lesionLocalization":"U-Net","classifierAttention":"Grad-CAM"},"processing":{"classifierInput":"cropped RGB, 300x300, float32 0-255","segmentationInput":"cropped RGB, 384x384, float32 0-255"}}
+ result.update({"predictedGrade":grade,"calibratedConfidence":result["gradeConfidence"],"classProbabilities":list(result["gradeProbabilities"].values()),"referralDecision":decision,"gradCamUrl":None,"modelMode":"demo" if DEMO_MODE else "real","fusedReferableProbability":round(fused,5)})
+ return result
 def create_report(path,result,lesion_path,gradcam_path):
- c=canvas.Canvas(str(path),pagesize=letter);c.setTitle('RetinaView screening report');c.setFont('Helvetica-Bold',18);c.drawString(50,750,'RetinaView — Screening Review');c.setFont('Helvetica',10)
- lines=[f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",f"DR severity prediction: Grade {result['predictedGrade']} — {result['gradeLabel']}",f"Calibrated confidence: {result['calibratedConfidence']:.1%}",f"Referable DR probability: {result['referableProbability']:.1%}",f"Referral decision: {result['referralDecision']} (threshold: {result['referralThreshold']:.4f})",'Screening decision-support prototype only; not a clinical diagnosis.','U-Net is lesion localization. Grad-CAM is classifier attention, not lesion localization.']
+ c=canvas.Canvas(str(path),pagesize=letter);c.setTitle("RetinaView screening report");c.setFont("Helvetica-Bold",18);c.drawString(50,750,"RetinaView — Screening Review");c.setFont("Helvetica",10)
+ lines=[f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",f"DR severity: Grade {result['grade']} — {result['gradeLabel']}",f"Grade confidence: {result['gradeConfidence']:.1%}",f"Referable DR probability: {result['referableProbability']:.1%}",f"Screening recommendation: {result['decision']} (threshold: {result['referralThreshold']:.4f})","Screening decision-support prototype only; not a clinical diagnosis.","U-Net is lesion localization. Grad-CAM is classifier attention, not precise lesion localization."]
  y=720
- for text in lines:c.drawString(50,y,text);y-=18
- c.drawImage(ImageReader(str(lesion_path)),55,140,width=220,height=220,preserveAspectRatio=True);c.drawImage(ImageReader(str(gradcam_path)),330,140,width=220,height=220,preserveAspectRatio=True);c.drawString(55,125,'Lesion localization — U-Net');c.drawString(330,125,'Classifier attention — Grad-CAM');c.save()
-
-app=FastAPI(title='RetinaView Inference Service');app.add_middleware(CORSMiddleware,allow_origins=os.getenv('CORS_ORIGINS','*').split(','),allow_methods=['*'],allow_headers=['*']);app.mount('/images',StaticFiles(directory=OUT/'images'),name='images');app.mount('/reports',StaticFiles(directory=OUT/'reports'),name='reports')
-@app.on_event('startup')
+ for line in lines:c.drawString(50,y,line);y-=18
+ c.drawImage(ImageReader(str(lesion_path)),55,140,width=220,height=220,preserveAspectRatio=True);c.drawImage(ImageReader(str(gradcam_path)),330,140,width=220,height=220,preserveAspectRatio=True);c.save()
+app=FastAPI(title="RetinaView Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","*").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
+@app.on_event("startup")
 def startup():init_models()
-@app.get('/health')
-def health():return {'service':'healthy',**status,'mode':'demo' if DEMO_MODE else 'real'}
-@app.post('/infer')
+@app.get("/health")
+def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","inferenceMode":"DEMO" if DEMO_MODE else "REAL","classifier":"V4 Multi-Domain",**status}
+@app.post("/infer")
 async def infer(image:UploadFile=File(...)):
- filename=Path(image.filename or '').name;extension=Path(filename).suffix.lower();mime=(image.content_type or '').lower();valid_mime=mime in ('image/jpeg','image/jpg','image/png','image/x-png');valid_extension=extension in ('.jpg','.jpeg','.png')
- if not (valid_mime or valid_extension):raise HTTPException(400,'Unsupported file type. Upload a JPG or PNG image.')
- payload=await image.read();log.info('Upload received: filename=%s content_type=%s bytes=%d',filename,mime,len(payload))
- if not payload:raise HTTPException(400,'The uploaded image is empty.')
- try:original=Image.open(io.BytesIO(payload)).convert('RGB')
- except Exception as exc:raise HTTPException(400,'Unable to decode the uploaded image.') from exc
- cropped=crop_fundus(original);cls_image=np.asarray(cropped.resize((300,300)),dtype='float32').clip(0,255);seg_image=np.asarray(cropped.resize((384,384)),dtype='float32').clip(0,255)
- if DEMO_MODE: probabilities,mask,lesion_probability=demo_prediction(seg_image.astype('uint8'));grad_heatmap=lesion_probability
- else:
-  raw=classifier.predict(cls_image[None],verbose=0)[0];probabilities=calibrated_probabilities(raw);lesion_probability=segmenter.predict(seg_image[None],verbose=0)[0,:,:,0]
-  if not np.isfinite(lesion_probability).all() or lesion_probability.min()<0 or lesion_probability.max()>1:raise HTTPException(500,'Segmentation model returned invalid probabilities')
-  mask=lesion_probability>=float(summary['segmentation']['validation_threshold']);grad_heatmap=gradcam(cls_image[None])
- grade=int(np.argmax(probabilities));referable=float(probabilities[2:].sum());referral_threshold=float(summary['classifier']['referral_threshold'])
- result={'predictedGrade':grade,'gradeLabel':CLASSES[grade],'calibratedConfidence':round(float(probabilities[grade]),5),'classProbabilities':[round(float(x),5) for x in probabilities],'referableProbability':round(referable,5),'referralThreshold':referral_threshold,'referralDecision':'REFER' if referable>=referral_threshold else 'NON-REFER','segmentationThreshold':float(summary['segmentation']['validation_threshold']),'modelMode':'demo' if DEMO_MODE else 'real','processing':{'classifierInput':'cropped RGB, 300x300, float32 0-255','segmentationInput':'cropped RGB, 384x384, float32 0-255'}}
- uid=uuid.uuid4().hex;base=seg_image.astype('uint8');lesion_file=OUT/'images'/f'{uid}-lesion.png';mask_file=OUT/'images'/f'{uid}-mask.png';cam_file=OUT/'images'/f'{uid}-gradcam.png'
- result['lesionOverlayUrl']=save_png(make_overlay(base,mask),lesion_file);result['lesionMaskUrl']=save_png(mask.astype('uint8')*255,mask_file);heat=cv2.applyColorMap((cv2.resize(grad_heatmap,(384,384))*255).astype('uint8'),cv2.COLORMAP_JET);result['gradCamUrl']=save_png(cv2.addWeighted(base,.58,heat,.42,0),cam_file)
- report=OUT/'reports'/f'{uid}-report.pdf';create_report(report,result,lesion_file,cam_file);result['reportUrl']='/reports/'+report.name;return result
+ suffix=Path(image.filename or "").suffix.lower();mime=(image.content_type or "").lower()
+ if suffix not in (".jpg",".jpeg",".png") and mime not in ("image/jpeg","image/jpg","image/png","image/x-png"):raise HTTPException(400,"Unsupported file type. Upload a JPG or PNG image.")
+ try:original=Image.open(io.BytesIO(await image.read())).convert("RGB")
+ except Exception as exc:raise HTTPException(400,"Unable to decode the uploaded image.") from exc
+ cropped=crop_fundus(original);cls=np.asarray(cropped.resize((300,300)),dtype=np.float32).clip(0,255);seg=np.asarray(cropped.resize((384,384)),dtype=np.float32).clip(0,255)
+ if DEMO_MODE:raise HTTPException(503,"DEMO_MODE is enabled; real V4 screening is required for this deployment.")
+ try:
+  raw_grade,raw_binary=normalize_classifier_outputs(classifier.predict(cls[None],verbose=0));lesion_probability=segmenter.predict(seg[None],verbose=0)[0,:,:,0]
+  if not np.isfinite(lesion_probability).all():raise RuntimeError("Segmentation returned invalid values")
+  mask=lesion_probability>=float(deployment["segmentation"]["threshold"]);heatmap=generate_gradcam(cls[None])
+ except Exception as exc:log.exception("Inference failed");raise HTTPException(500,"Inference failed. See service logs for details.") from exc
+ result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";result["lesionOverlayUrl"]=save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);result["gradcamUrl"]=result["gradCamUrl"]=save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam);result["reportUrl"]="/reports/"+report.name;return result
