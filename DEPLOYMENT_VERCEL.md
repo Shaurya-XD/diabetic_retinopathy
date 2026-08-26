@@ -18,11 +18,11 @@ JWT_SECRET=
 DEMO_MODE=false
 BLOB_READ_WRITE_TOKEN=
 STORAGE_MODE=vercel-blob
-ML_SERVICE_URL=
+ML_SERVICE_URL= # optional on Vercel; set this only for an external ML service
 CLIENT_ORIGIN=https://your-domain.example
 ```
 
-Never use `VITE_` for the MongoDB URI, JWT secret, ML URL, or Blob token. Create a Blob store in Storage and connect it to the project to obtain `BLOB_READ_WRITE_TOKEN`.
+Never use `VITE_` for the MongoDB URI, JWT secret, ML URL, or Blob token. Create a Blob store in Storage and connect it to the project to obtain `BLOB_READ_WRITE_TOKEN`. In Vercel, enable **Settings -> Environment Variables -> Automatically expose System Environment Variables** so `VERCEL_URL` is available; when `ML_SERVICE_URL` is omitted, the API derives `https://$VERCEL_URL/api/ml`.
 
 ## Local commands
 
