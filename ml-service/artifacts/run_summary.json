@@ -1,0 +1,49 @@
+{
+  "project": "Explainable DR Screening v3",
+  "seed": 42,
+  "config": {
+    "ram_gb": 13.6,
+    "gpu": true,
+    "cls_size": [
+      300,
+      300
+    ],
+    "cls_batch": 12,
+    "seg_size": [
+      384,
+      384
+    ],
+    "seg_batch": 4,
+    "head_epochs": 10,
+    "fine_epochs": 14,
+    "seg_stage1_epochs": 15,
+    "seg_stage2_epochs": 20
+  },
+  "classifier": {
+    "selected_stage": "head_only",
+    "temperature": 0.8320230381499122,
+    "referral_threshold": 0.3188608191210113,
+    "threshold_rule": ">=90% validation sensitivity, then maximum specificity",
+    "aptos_test_accuracy": 0.7727272727272727,
+    "aptos_test_qwk": 0.8201732875592611,
+    "aptos_test_referable_auc": 0.9698852182498869,
+    "aptos_test_sensitivity": 0.905829596412556,
+    "aptos_test_specificity": 0.8899082568807339
+  },
+  "segmentation": {
+    "target": "binary_union_MA_HE_EX_SE",
+    "selected_stage": "fine_tuned",
+    "validation_threshold": 0.8500000000000002,
+    "validation_dice": 0.5435399836088107,
+    "validation_iou": 0.3731925198716067,
+    "validation_precision": 0.5073841824118475,
+    "validation_recall": 0.5852440158212389,
+    "reliable_flag": true
+  },
+  "messidor_external": null,
+  "paths": {
+    "classifier": "/content/drive/MyDrive/sih/outputs_v3/aptos_efficientnetb0_final.keras",
+    "segmentation_weights": "/content/drive/MyDrive/sih/outputs_v3/idrid_lesion_unet_final.weights.h5",
+    "output_root": "/content/drive/MyDrive/sih/outputs_v3"
+  }
+}

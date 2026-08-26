@@ -1,0 +1,10 @@
+node_modules/
+.env
+dist/
+uploads/
+__pycache__/
+*.pyc
+*.keras
+*.h5
+.npm-cache/
+ml-service/runtime/
