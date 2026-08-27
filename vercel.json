@@ -1,12 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
   "buildCommand": "npm ci --prefix client && npm run build --prefix client",
   "outputDirectory": "client/dist",
-  "functions": {
-    "api/index.js": {
-      "excludeFiles": "{ml-service/**,*.py,**/*.py,**/*.keras,**/*.h5,**/*.ipynb,client/**,client/dist/**,work/**,work/ml-venv/**,uploads/**,outputs/**,**/__pycache__/**,**/.pytest_cache/**,venv/**,.venv/**,.git/**,.github/**}"
-    }
-  },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/(.*)", "destination": "/index.html" }
