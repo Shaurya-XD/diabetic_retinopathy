@@ -3,6 +3,8 @@ work
 uploads
 outputs
 ml-service/runtime
+**/__pycache__
+**/.pytest_cache
 *.ipynb
 .npm-cache
 README.md
