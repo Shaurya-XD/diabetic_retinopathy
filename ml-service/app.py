@@ -82,11 +82,25 @@ def fetch_private_image(url):
  except (socket.timeout,TimeoutError):log.warning("Private input GET timed out: host=%s",parsed.hostname);raise HTTPException(400,"Unable to retrieve the uploaded image.")
  except URLError as exc:log.warning("Private input GET failed: network_error=%s host=%s",type(exc.reason).__name__,parsed.hostname);raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
  except Exception as exc:raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
-def put_scoped(url,path,content_type):
+def put_scoped(url,path,content_type,asset,expected_path):
+ data=path.read_bytes()
+ if not data: raise RuntimeError(f"Generated {asset} asset is empty")
+ log.info("Generated asset bytes: asset=%s bytes=%s",asset,len(data))
  try:
-  request=Request(url,data=path.read_bytes(),method="PUT",headers={"Content-Type":content_type});response=urlopen(request,timeout=45)
-  if not 200<=response.status<300:raise RuntimeError(f"asset upload returned HTTP {response.status}")
- except Exception as exc:raise RuntimeError("Unable to persist generated asset to private storage") from exc
+  request=Request(url,data=data,method="PUT",headers={"Content-Type":content_type})
+  with urlopen(request,timeout=45) as response:
+   status=response.status;body=response.read()
+  if not 200<=status<300:
+   log.error("Generated asset PUT failed: asset=%s status=%s",asset,status)
+   raise RuntimeError(f"asset upload returned HTTP {status}")
+  log.info("Generated asset PUT succeeded: asset=%s status=%s",asset,status)
+  try: actual_path=json.loads(body.decode("utf-8")).get("pathname")
+  except (UnicodeDecodeError,json.JSONDecodeError,AttributeError): actual_path=None
+  return actual_path or expected_path
+ except HTTPError as exc:
+  log.error("Generated asset PUT failed: asset=%s status=%s",asset,exc.code)
+  raise RuntimeError("Unable to persist generated asset to private storage") from exc
+ except Exception as exc: raise RuntimeError("Unable to persist generated asset to private storage") from exc
 def make_overlay(base,mask):
  layer=np.zeros_like(base);layer[mask]=(220,32,44);return cv2.addWeighted(base,1,layer,.48,0)
 def build_inference_result(raw_grade,raw_binary):
@@ -142,7 +156,7 @@ async def infer(image:UploadFile|None=File(None),imageUrl:str=Form(""),assetUplo
  result=build_inference_result(raw_grade,raw_binary);uid=uuid.uuid4().hex;base=seg.astype(np.uint8);lesion=OUT/"images"/f"{uid}-lesion.png";cam=OUT/"images"/f"{uid}-gradcam.png";save_png(make_overlay(base,mask),lesion);heat=cv2.applyColorMap((cv2.resize(heatmap,(384,384)).clip(0,1)*255).astype(np.uint8),cv2.COLORMAP_JET);save_png(cv2.addWeighted(base,.58,heat,.42,0),cam);report=OUT/"reports"/f"{uid}-report.pdf";create_report(report,result,lesion,cam,{"name":patientName,"recordId":recordId,"age":age})
  if storageMode=="vercel-blob":
   try:
-   uploads=json.loads(assetUploads);paths=json.loads(assetPaths);put_scoped(uploads["lesionUploadUrl"],lesion,"image/png");put_scoped(uploads["gradcamUploadUrl"],cam,"image/png");put_scoped(uploads["reportUploadUrl"],report,"application/pdf");result.update({"lesionBlobPath":paths["lesionBlobPath"],"gradcamBlobPath":paths["gradcamBlobPath"],"reportBlobPath":paths["reportBlobPath"],"lesionOverlayUrl":None,"gradcamUrl":None,"gradCamUrl":None,"reportUrl":None})
+   uploads=json.loads(assetUploads);paths=json.loads(assetPaths);lesion_path=put_scoped(uploads["lesionUploadUrl"],lesion,"image/png","lesion",paths["lesionBlobPath"]);gradcam_path=put_scoped(uploads["gradcamUploadUrl"],cam,"image/png","gradcam",paths["gradcamBlobPath"]);report_path=put_scoped(uploads["reportUploadUrl"],report,"application/pdf","report",paths["reportBlobPath"]);result.update({"lesionBlobPath":lesion_path,"gradcamBlobPath":gradcam_path,"reportBlobPath":report_path,"lesionOverlayUrl":None,"gradcamUrl":None,"gradCamUrl":None,"reportUrl":None})
   finally:
    for path in (lesion,cam,report):path.unlink(missing_ok=True)
  else:result["lesionOverlayUrl"]="/images/"+lesion.name;result["gradcamUrl"]=result["gradCamUrl"]="/images/"+cam.name;result["reportUrl"]="/reports/"+report.name
