@@ -8,6 +8,8 @@ The Vite client is deployed as the static site. `/api/*` is a Node/Express funct
 
 The two model files are approximately 17 MB (`dr_multidomain_efficientnetb0_v4.keras`) and 70 MB (`idrid_lesion_unet_final.weights.h5`), 87 MB total before TensorFlow and OpenCV. The current ML function bundles at approximately 2.08 GB uncompressed, above Vercel's standard 500 MB Python limit. It requires **Large Functions (public beta)**, which permits up to 5 GB on **Fluid Compute with Active CPU enabled**. New projects are enrolled automatically; for existing projects add `VERCEL_SUPPORT_LARGE_FUNCTIONS=1` and redeploy. Set `VERCEL_ANALYZE_BUILD_OUTPUT=1` on a diagnostic deployment to inspect bundle contributors. For practical TensorFlow inference, use Pro/Enterprise and select Performance (4 GB / 2 vCPU) in Settings -> Functions -> Advanced Settings. Do not enable Secure Compute or Static IPs for this function, as Large Functions does not support them.
 
+`vercel.json` deliberately gives `api/index.js` a separate exclusion set for `ml-service/**`, model files, client files, notebooks, caches, uploads, and outputs. The normal Node/Express function must remain below the standard function limit. `api/ml.py` retains the required `ml-service/artifacts` files and is the only function expected to use Large Functions.
+
 ## Required Vercel environment variables
 
 Set these for Production and Preview; use local `.env` only for Development:

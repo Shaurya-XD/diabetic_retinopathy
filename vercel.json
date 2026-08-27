@@ -3,9 +3,12 @@
   "buildCommand": "npm ci --prefix client && npm run build --prefix client",
   "outputDirectory": "client/dist",
   "functions": {
+    "api/index.js": {
+      "excludeFiles": "{ml-service/**,api/ml.py,client/**,work/**,uploads/**,outputs/**,**/*.keras,**/*.h5,**/*.ipynb,**/__pycache__/**,**/.pytest_cache/**,**/venv/**,**/.venv/**}"
+    },
     "api/ml.py": {
       "maxDuration": 300,
-      "excludeFiles": "{work/**,uploads/**,outputs/**,**/*.ipynb,node_modules/**,ml-service/runtime/**}"
+      "excludeFiles": "{work/**,uploads/**,outputs/**,client/**,node_modules/**,**/*.ipynb,**/__pycache__/**,**/.pytest_cache/**,**/venv/**,**/.venv/**,ml-service/runtime/**}"
     }
   },
   "rewrites": [
