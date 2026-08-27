@@ -1,8 +1,9 @@
 """EyeZen V4 multi-domain inference API."""
-import io, json, logging, os, secrets, uuid
+import io, json, logging, os, secrets, socket, uuid
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 import cv2, numpy as np
 from PIL import Image
@@ -69,12 +70,17 @@ def generate_gradcam(classifier_input):
 def save_png(image,path): Image.fromarray(image).save(path,"PNG");return "/images/"+path.name
 def fetch_private_image(url):
  parsed=urlparse(url)
- if parsed.scheme!="https" or not (parsed.hostname or "").endswith(".private.blob.vercel-storage.com"):raise HTTPException(400,"Invalid private image source.")
+ query=parse_qs(parsed.query)
+ if parsed.scheme!="https" or not (parsed.hostname or "").endswith(".private.blob.vercel-storage.com") or not query.get("vercel-blob-delegation") or not query.get("vercel-blob-signature"):raise HTTPException(400,"Invalid private image source.")
  try:
-  with urlopen(Request(url,headers={"Accept":"image/jpeg,image/png"}),timeout=20) as response:
-   content_type=response.headers.get_content_type();data=response.read(12*1024*1024+1)
-  if content_type not in ("image/jpeg","image/png") or len(data)>12*1024*1024:raise ValueError("invalid image response")
+  with urlopen(Request(url,headers={"Accept":"image/jpeg,image/png"}),timeout=45) as response:
+   status=response.status;content_type=response.headers.get_content_type();data=response.read(12*1024*1024+1)
+  if status!=200:log.warning("Private input GET failed: status=%s host=%s",status,parsed.hostname);raise ValueError("unexpected image response")
+  if content_type not in ("image/jpeg","image/png") or len(data)>12*1024*1024:log.warning("Private input GET rejected: status=%s content_type=%s host=%s",status,content_type,parsed.hostname);raise ValueError("invalid image response")
   return data
+ except HTTPError as exc:log.warning("Private input GET failed: status=%s host=%s",exc.code,parsed.hostname);raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
+ except (socket.timeout,TimeoutError):log.warning("Private input GET timed out: host=%s",parsed.hostname);raise HTTPException(400,"Unable to retrieve the uploaded image.")
+ except URLError as exc:log.warning("Private input GET failed: network_error=%s host=%s",type(exc.reason).__name__,parsed.hostname);raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
  except Exception as exc:raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
 def put_scoped(url,path,content_type):
  try:
