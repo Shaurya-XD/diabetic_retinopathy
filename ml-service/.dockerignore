@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+outputs/
+uploads/
+runtime/
+tests/
+*.ipynb
+.ipynb_checkpoints/
+datasets/
+training/
+.git/
+.gitignore

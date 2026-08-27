@@ -1,2 +1,0 @@
-# Vercel discovers Python dependencies from the project root.
--r ml-service/requirements.txt

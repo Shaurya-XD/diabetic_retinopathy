@@ -4,15 +4,10 @@
   "outputDirectory": "client/dist",
   "functions": {
     "api/index.js": {
-      "excludeFiles": "{ml-service/**,api/ml.py,*.py,**/*.py,**/*.keras,**/*.h5,**/*.ipynb,client/**,client/dist/**,work/**,work/ml-venv/**,uploads/**,outputs/**,**/__pycache__/**,**/.pytest_cache/**,venv/**,.venv/**,.git/**,.github/**}"
-    },
-    "api/ml.py": {
-      "maxDuration": 300,
-      "excludeFiles": "{work/**,uploads/**,outputs/**,client/**,node_modules/**,**/*.ipynb,**/__pycache__/**,**/.pytest_cache/**,**/venv/**,**/.venv/**,ml-service/runtime/**}"
+      "excludeFiles": "{ml-service/**,*.py,**/*.py,**/*.keras,**/*.h5,**/*.ipynb,client/**,client/dist/**,work/**,work/ml-venv/**,uploads/**,outputs/**,**/__pycache__/**,**/.pytest_cache/**,venv/**,.venv/**,.git/**,.github/**}"
     }
   },
   "rewrites": [
-    { "source": "/api/ml/(.*)", "destination": "/api/ml.py" },
     { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]

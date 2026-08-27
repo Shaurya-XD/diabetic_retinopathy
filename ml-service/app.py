@@ -1,13 +1,12 @@
 """EyeZen V4 multi-domain inference API."""
-import io, json, logging, os, uuid
+import io, json, logging, os, secrets, uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import cv2, numpy as np
 from PIL import Image
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
@@ -15,7 +14,7 @@ from reportlab.pdfgen import canvas
 
 ROOT=Path(__file__).parent; ART=Path(os.getenv("ARTIFACTS_DIR",ROOT/"artifacts")); OUT=Path(os.getenv("OUTPUT_DIR",ROOT/"runtime"))
 for d in (OUT/"images",OUT/"reports"): d.mkdir(parents=True,exist_ok=True)
-DEMO_MODE=os.getenv("DEMO_MODE","false").lower()=="true"; CLASSES=["No DR","Mild DR","Moderate DR","Severe DR","Proliferative DR"]
+DEMO_MODE=os.getenv("DEMO_MODE","false").lower()=="true"; INTERNAL_ML_SECRET=os.getenv("INTERNAL_ML_SECRET",""); ALLOW_UNAUTHENTICATED_LOCAL_INFER=os.getenv("ALLOW_UNAUTHENTICATED_LOCAL_INFER","false").lower()=="true"; CLASSES=["No DR","Mild DR","Moderate DR","Severe DR","Proliferative DR"]
 REQUIRED_CALIBRATION_KEYS={"grade_temperature","screen_fusion_alpha_binary_head","screen_fusion_alpha_grade_sum","platt_a","platt_b","referral_threshold","threshold_rule"}
 logging.basicConfig(level=logging.INFO,format="%(levelname)s: %(message)s"); log=logging.getLogger("eyezen.ml")
 classifier=segmenter=grad_model=calibration=deployment=None; status={"classifierLoaded":False,"segmentationLoaded":False,"calibrationLoaded":False}
@@ -79,8 +78,9 @@ def fetch_private_image(url):
  except Exception as exc:raise HTTPException(400,"Unable to retrieve the uploaded image.") from exc
 def put_scoped(url,path,content_type):
  try:
-  request=Request(url,data=path.read_bytes(),method="PUT",headers={"Content-Type":content_type});urlopen(request,timeout=30).read()
- except Exception as exc:raise RuntimeError("Unable to persist generated asset") from exc
+  request=Request(url,data=path.read_bytes(),method="PUT",headers={"Content-Type":content_type});response=urlopen(request,timeout=45)
+  if not 200<=response.status<300:raise RuntimeError(f"asset upload returned HTTP {response.status}")
+ except Exception as exc:raise RuntimeError("Unable to persist generated asset to private storage") from exc
 def make_overlay(base,mask):
  layer=np.zeros_like(base);layer[mask]=(220,32,44);return cv2.addWeighted(base,1,layer,.48,0)
 def build_inference_result(raw_grade,raw_binary):
@@ -105,12 +105,17 @@ def create_report(path,result,lesion_path,gradcam_path,patient):
  c.setFont("Helvetica-Bold",12);c.drawString(48,height-82,"Lesion Localization - U-Net");c.drawImage(ImageReader(str(lesion_path)),48,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,370,"U-Net highlights regions predicted to contain pathological retinal lesions.")
  c.setFont("Helvetica-Bold",12);c.drawString(325,height-82,"Classifier Attention - Grad-CAM");c.drawImage(ImageReader(str(gradcam_path)),325,390,width=235,height=235,preserveAspectRatio=True);c.setFont("Helvetica",9);c.drawString(48,340,"Grad-CAM indicates regions that most influenced the classifier's referable-DR decision and should not be interpreted as") ;c.drawString(48,326,"precise lesion localization.")
  c.setFont("Helvetica-Bold",12);c.setFillColor("#17283b");c.drawString(48,285,"Responsible Use");c.setFont("Helvetica",10);c.setFillColor("#101820");c.drawString(48,266,"Screening decision-support prototype only; not a clinical diagnosis.");c.setFillColor("#526170");c.setFont("Helvetica",8);c.drawRightString(width-48,32,"Page 2 of 2");c.save()
-app=FastAPI(title="EyeZen Inference Service");app.add_middleware(CORSMiddleware,allow_origins=os.getenv("CORS_ORIGINS","http://localhost:5173").split(","),allow_methods=["*"],allow_headers=["*"]);app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
+app=FastAPI(title="EyeZen Inference Service");app.mount("/images",StaticFiles(directory=OUT/"images"),name="images");app.mount("/reports",StaticFiles(directory=OUT/"reports"),name="reports")
 @app.on_event("startup")
-def startup():init_models()
+def startup():
+ if not INTERNAL_ML_SECRET and not ALLOW_UNAUTHENTICATED_LOCAL_INFER:raise RuntimeError("INTERNAL_ML_SECRET is required; set ALLOW_UNAUTHENTICATED_LOCAL_INFER=true only for explicit local development.")
+ init_models()
 @app.get("/health")
-def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","inferenceMode":"DEMO" if DEMO_MODE else "REAL","classifier":"V4 Multi-Domain","storage":os.getenv("STORAGE_MODE","local"),**status}
-@app.post("/infer")
+def health():return {"status":"ok","mode":"DEMO" if DEMO_MODE else "REAL","classifierLoaded":status["classifierLoaded"],"segmentationLoaded":status["segmentationLoaded"],"calibrationLoaded":status["calibrationLoaded"],"storage":"signed-vercel-blob"}
+def require_internal_secret(x_eyezen_internal_secret:str|None=Header(None)):
+ if ALLOW_UNAUTHENTICATED_LOCAL_INFER:return
+ if not INTERNAL_ML_SECRET or not x_eyezen_internal_secret or not secrets.compare_digest(x_eyezen_internal_secret,INTERNAL_ML_SECRET):raise HTTPException(403,"Forbidden")
+@app.post("/infer",dependencies=[Depends(require_internal_secret)])
 async def infer(image:UploadFile|None=File(None),imageUrl:str=Form(""),assetUploads:str=Form(""),assetPaths:str=Form(""),storageMode:str=Form("local"),patientName:str=Form(""),recordId:str=Form(""),age:str=Form("")):
  if imageUrl:
   payload=fetch_private_image(imageUrl)
